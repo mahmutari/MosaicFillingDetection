@@ -16,6 +16,7 @@ find_package(OpenCV REQUIRED COMPONENTS core highgui imgproc aruco)
 add_executable(MosaicFillingDetectionApp 
     main.cpp
     MosaicDetector.cpp
+    MosaicDetector.h
 )
 
 # OpenCV kütüphanelerini çalıştırılabilir dosyamıza bağla
