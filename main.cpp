@@ -2,7 +2,7 @@
 
 int main() {
     try {
-        MosaicDetector detector("mosaic.jpg", 23, 0);
+        MosaicDetector detector("C:/Users/pc/Desktop/MosaicFillingDetection/mosaic.jpg", 23, 0);
         detector.run();
     }
     catch (const std::exception& e) {
