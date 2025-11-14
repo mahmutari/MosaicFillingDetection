@@ -1,0 +1,5 @@
+# CMake derleme klasörünü yoksay
+build/
+
+# Visual Studio önbellek dosyalarını yoksay
+.vs/
