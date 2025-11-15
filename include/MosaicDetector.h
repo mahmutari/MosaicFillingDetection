@@ -5,7 +5,6 @@
 #include <opencv2/opencv.hpp>
 
 // Modüler sýnýflarýmýzý dahil ediyoruz
-
 #include "ColorHistory.h"
 #include "ColorDetector.h"
 #include "MarkerDetector.h"
@@ -31,7 +30,8 @@ private:
     cv::Mat generateDigitalOutput(const cv::Mat& warped_frame);
 
 public:
-    MosaicDetector(const std::string& template_path, int target_marker_id,
+    MosaicDetector(const std::string& template_path,
+        int target_marker_id,
         int camera_index = 0);
     ~MosaicDetector();
 

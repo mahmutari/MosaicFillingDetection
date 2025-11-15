@@ -15,7 +15,9 @@ TemplateProcessor::TemplateProcessor(const std::string& template_path) {
 void TemplateProcessor::extractContoursAndLines() {
     cv::Mat gray;
     cv::cvtColor(template_image_, gray, cv::COLOR_BGR2GRAY);
+
     cv::threshold(gray, template_lines_, 200, 255, cv::THRESH_BINARY_INV);
+
     cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2, 2));
     cv::dilate(template_lines_, template_lines_, kernel);
 
@@ -32,9 +34,18 @@ void TemplateProcessor::extractContoursAndLines() {
             contours_.push_back(contour);
         }
     }
+
     std::cout << "Found " << contours_.size() << " mosaic pieces." << std::endl;
 }
 
-const cv::Mat& TemplateProcessor::getTemplateLines() const { return template_lines_; }
-const std::vector<std::vector<cv::Point>>& TemplateProcessor::getContours() const { return contours_; }
-cv::Size TemplateProcessor::getOutputSize() const { return output_size_; }
+const cv::Mat& TemplateProcessor::getTemplateLines() const {
+    return template_lines_;
+}
+
+const std::vector<std::vector<cv::Point>>& TemplateProcessor::getContours() const {
+    return contours_;
+}
+
+cv::Size TemplateProcessor::getOutputSize() const {
+    return output_size_;
+}
