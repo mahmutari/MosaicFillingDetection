@@ -1,28 +1,31 @@
-# Gerekli minimum CMake versiyonunu belirt
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.15)
 
-# Projenin adını tanımla
-project(MosaicFillingDetection)
+project(MosaicCMake VERSION 1.0 LANGUAGES CXX)
 
-# C++ 17 standardını kullan
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# OpenCV bul
+find_package(OpenCV REQUIRED)
 
-# vcpkg aracılığıyla OpenCV'yi ve ArUco modülünü bul
-find_package(OpenCV REQUIRED COMPONENTS core highgui imgproc aruco)
+# Kaynak ve header dosyalarını otomatik topla
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
+file(GLOB_RECURSE HEADERS CONFIGURE_DEPENDS "include/*.h")
 
-# Çalıştırılabilir dosyayı ve tüm .cpp dosyalarını tanımla
-add_executable(MosaicFillingDetectionApp 
-    main.cpp
-    MosaicDetector.cpp
-    ColorHistory.cpp
-    ColorDetector.cpp
-    MarkerDetector.cpp
-    TemplateProcessor.cpp
+# Executable oluştur
+add_executable(${PROJECT_NAME}
+    ${SOURCES}
+    ${HEADERS}
 )
 
-# Derleyiciye header dosyaları için ana klasöre de bakmasını söyle
-target_include_directories(MosaicFillingDetectionApp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# Include dizinleri
+target_include_directories(${PROJECT_NAME} PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 
-# OpenCV kütüphanelerini çalıştırılabilir dosyamıza bağla
-target_link_libraries(MosaicFillingDetectionApp PRIVATE ${OpenCV_LIBS})
+# OpenCV
+target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})
+
+# VS için filtreler
+source_group("Source Files" FILES ${SOURCES})
+source_group("Header Files" FILES ${HEADERS})
+
+# C++17
+set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 17)

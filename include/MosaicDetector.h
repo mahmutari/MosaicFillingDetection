@@ -6,10 +6,10 @@
 
 // Modüler sýnýflarýmýzý dahil ediyoruz
 
-#include "build/ColorHistory.h"
-#include "build/ColorDetector.h"
-#include "build/MarkerDetector.h"
-#include "build/TemplateProcessor.h"
+#include "ColorHistory.h"
+#include "ColorDetector.h"
+#include "MarkerDetector.h"
+#include "TemplateProcessor.h"
 
 class MosaicDetector {
 private:
