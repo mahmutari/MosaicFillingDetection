@@ -20,7 +20,11 @@ bool ColorDetector::isYellow(int h, int r, int g) const {
 }
 
 bool ColorDetector::isGreen(int h, int g, int r, int b) const {
-    return (h >= 45 && h <= 80) && (g > 110) && (g > r * 1.3) && (g > b * 1.2);
+    // Hue 35-90 arası (sarımsı yeşilden cyan'a kadar)
+    // Yeşil kanalı en az 70 olmalı ve diğerlerinden büyük olmalı
+    bool hue_ok = (h >= 35 && h <= 90);
+    bool green_dominant = (g >= 70) && (g > r * 1.1) && (g > b * 1.1);
+    return hue_ok && green_dominant;
 }
 
 bool ColorDetector::isBlue(int h, int b, int r, int g) const {
@@ -31,16 +35,38 @@ bool ColorDetector::isPurple(int h, int r, int g, int b) const {
     return (h >= 135 && h <= 160) && (r > 100) && (b > 100) && (abs(r - b) < 60);
 }
 
-cv::Scalar ColorDetector::detectDominantColor(const cv::Mat& roi_bgr,
+std::string ColorDetector::getColorName(const cv::Scalar& color) const {
+    int b = static_cast<int>(color[0]);
+    int g = static_cast<int>(color[1]);
+    int r = static_cast<int>(color[2]);
+
+    if (r == 255 && g == 255 && b == 255) return "White";
+    if (r == 255 && g == 0 && b == 0) return "Red";
+    if (r == 255 && g == 165 && b == 0) return "Orange";
+    if (r == 255 && g == 255 && b == 0) return "Yellow";
+    if (r == 0 && g == 255 && b == 0) return "Green";
+    if (r == 0 && g == 0 && b == 255) return "Blue";
+    if (r == 255 && g == 0 && b == 255) return "Purple";
+
+    return "Unknown";
+}
+
+ColorDetectionResult ColorDetector::detectColorWithRatio(const cv::Mat& roi_bgr,
     const cv::Mat& roi_hsv,
     const cv::Mat& mask) const {
 
+    ColorDetectionResult result;
+    result.fill_ratio = 0.0f;
+
     int red = 0, orange = 0, yellow = 0, green = 0, blue = 0, purple = 0;
-    int total_colored_pixels = 0;
+    int total_valid_pixels = 0;
+    int total_non_white_pixels = 0;
 
     for (int y = 0; y < roi_hsv.rows; y++) {
         for (int x = 0; x < roi_hsv.cols; x++) {
             if (mask.at<uchar>(y, x) == 0) continue;
+
+            total_valid_pixels++;
 
             cv::Vec3b hsv = roi_hsv.at<cv::Vec3b>(y, x);
             cv::Vec3b bgr = roi_bgr.at<cv::Vec3b>(y, x);
@@ -48,11 +74,19 @@ cv::Scalar ColorDetector::detectDominantColor(const cv::Mat& roi_bgr,
             int h = hsv[0], s = hsv[1], v = hsv[2];
             int b = bgr[0], g = bgr[1], r = bgr[2];
 
-            // Daha dengeli eşikler
-            if (v < 50 || v > 245 || s < 30) continue;
+            // Beyaz/gri tespiti
+            bool is_white_or_gray = (s < 35) || (v > 230 && s < 50);
 
-            total_colored_pixels++;
+            // Çok koyu pikseller
+            bool is_too_dark = (v < 40);
 
+            if (is_white_or_gray || is_too_dark) {
+                continue;
+            }
+
+            total_non_white_pixels++;
+
+            // Renk kategorilerini kontrol et
             if (isRed(h, r, g, b)) red++;
             else if (isOrange(h, r, g, b)) orange++;
             else if (isYellow(h, r, g)) yellow++;
@@ -62,36 +96,50 @@ cv::Scalar ColorDetector::detectDominantColor(const cv::Mat& roi_bgr,
         }
     }
 
-    // %15 eşiği
-    int threshold = std::max(8, total_colored_pixels / 7);
+    // Dominant rengi bul - eşiği düşürdüm
+    int threshold = std::max(3, total_non_white_pixels / 15);  // %7 eşik
 
     int max_count = 0;
-    cv::Scalar result_color(255, 255, 255);
+    cv::Scalar dominant_color(255, 255, 255);
 
     if (red > threshold && red > max_count) {
         max_count = red;
-        result_color = cv::Scalar(0, 0, 255);
+        dominant_color = cv::Scalar(0, 0, 255);
     }
     if (orange > threshold && orange > max_count) {
         max_count = orange;
-        result_color = cv::Scalar(0, 165, 255);
+        dominant_color = cv::Scalar(0, 165, 255);
     }
     if (yellow > threshold && yellow > max_count) {
         max_count = yellow;
-        result_color = cv::Scalar(0, 255, 255);
+        dominant_color = cv::Scalar(0, 255, 255);
     }
     if (green > threshold && green > max_count) {
         max_count = green;
-        result_color = cv::Scalar(0, 255, 0);
+        dominant_color = cv::Scalar(0, 255, 0);
     }
     if (blue > threshold && blue > max_count) {
         max_count = blue;
-        result_color = cv::Scalar(255, 0, 0);
+        dominant_color = cv::Scalar(255, 0, 0);
     }
     if (purple > threshold && purple > max_count) {
         max_count = purple;
-        result_color = cv::Scalar(255, 0, 255);
+        dominant_color = cv::Scalar(255, 0, 255);
     }
 
-    return result_color;
+    result.color = dominant_color;
+    result.color_name = getColorName(dominant_color);
+
+    if (total_valid_pixels > 0) {
+        result.fill_ratio = static_cast<float>(total_non_white_pixels) / static_cast<float>(total_valid_pixels);
+    }
+
+    return result;
+}
+
+cv::Scalar ColorDetector::detectDominantColor(const cv::Mat& roi_bgr,
+    const cv::Mat& roi_hsv,
+    const cv::Mat& mask) const {
+    ColorDetectionResult result = detectColorWithRatio(roi_bgr, roi_hsv, mask);
+    return result.color;
 }
