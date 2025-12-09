@@ -3,6 +3,7 @@
 #include <iostream>
 #include <iomanip>
 #include <sstream>
+#include <cmath>
 
 // Minimum fill ratio - bunun altındaki değerler beyaz olarak kabul edilir
 const float MIN_FILL_RATIO_THRESHOLD = 0.15f;  // %15
@@ -10,7 +11,7 @@ const float MIN_FILL_RATIO_THRESHOLD = 0.15f;  // %15
 MosaicDetector::MosaicDetector(const std::string& template_path,
     int target_marker_id,
     int camera_index)
-    : is_running_(false) {
+    : is_running_(false), current_rotation_(0) {
 
     template_processor_ = std::make_unique<TemplateProcessor>(template_path);
     color_detector_ = std::make_unique<ColorDetector>();
@@ -53,6 +54,102 @@ cv::Point MosaicDetector::calculateContourCentroid(const std::vector<cv::Point>&
     return cv::Point(static_cast<int>(m.m10 / m.m00), static_cast<int>(m.m01 / m.m00));
 }
 
+int MosaicDetector::detectRotation(const std::vector<std::vector<cv::Point2f>>& markers) {
+    if (markers.size() != 4) return 0;
+
+    // İlk marker'ı referans olarak kullan
+    const auto& first_marker = markers[0];
+    cv::Point2f marker_center(0, 0);
+    for (const auto& pt : first_marker) {
+        marker_center += pt;
+    }
+    marker_center *= 0.25f;
+
+    // Marker'ın 0. köşesinin merkeze göre yönü
+    cv::Point2f corner0_dir = first_marker[0] - marker_center;
+
+    // Açıyı hesapla
+    float angle = std::atan2(corner0_dir.y, corner0_dir.x) * 180.0f / CV_PI;
+
+    // Açıyı 0-360'a normalize et
+    if (angle < 0) angle += 360.0f;
+
+    // DEBUG: Açıyı konsola yazdır
+    static int frame_count = 0;
+    if (frame_count++ % 30 == 0) {
+        std::cout << "Angle: " << std::fixed << std::setprecision(1) << angle << " degrees" << std::endl;
+    }
+
+    // Çıktılara göre düzeltilmiş açı aralıkları:
+    // ~218° → Normal (0°)
+    // ~307° → 90° saat yönünde  
+    // ~36-46° → 180°
+    // ~142° → 270°
+
+    // 180-270 arası: Normal (0°)
+    if (angle >= 180.0f && angle < 270.0f) {
+        return 0;
+    }
+    // 270-360 arası: 90°
+    else if (angle >= 270.0f && angle < 360.0f) {
+        return 90;
+    }
+    // 0-90 arası: 180°
+    else if (angle >= 0.0f && angle < 90.0f) {
+        return 180;
+    }
+    // 90-180 arası: 270°
+    else {
+        return 270;
+    }
+}
+
+cv::Mat MosaicDetector::rotateImage(const cv::Mat& image, int rotation) {
+    if (rotation == 0) {
+        return image.clone();
+    }
+
+    cv::Mat rotated;
+
+    if (rotation == 90) {
+        cv::rotate(image, rotated, cv::ROTATE_90_CLOCKWISE);
+    }
+    else if (rotation == 180) {
+        cv::rotate(image, rotated, cv::ROTATE_180);
+    }
+    else if (rotation == 270) {
+        cv::rotate(image, rotated, cv::ROTATE_90_COUNTERCLOCKWISE);
+    }
+    else {
+        return image.clone();
+    }
+
+    return rotated;
+}
+
+cv::Mat MosaicDetector::rotateImageInverse(const cv::Mat& image, int rotation) {
+    if (rotation == 0) {
+        return image.clone();
+    }
+
+    cv::Mat rotated;
+
+    if (rotation == 90) {
+        cv::rotate(image, rotated, cv::ROTATE_90_COUNTERCLOCKWISE);
+    }
+    else if (rotation == 180) {
+        cv::rotate(image, rotated, cv::ROTATE_180);
+    }
+    else if (rotation == 270) {
+        cv::rotate(image, rotated, cv::ROTATE_90_CLOCKWISE);
+    }
+    else {
+        return image.clone();
+    }
+
+    return rotated;
+}
+
 cv::Mat MosaicDetector::applyPerspectiveTransform(
     const cv::Mat& frame,
     const std::vector<cv::Point2f>& src_points) {
@@ -76,7 +173,7 @@ cv::Mat MosaicDetector::applyPerspectiveTransform(
     cv::Mat warped;
     cv::warpPerspective(frame, warped, M, cv::Size(warp_width, warp_height),
         cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(255, 255, 255));
-    
+
     return warped;
 }
 
@@ -109,12 +206,10 @@ cv::Mat MosaicDetector::generateDigitalOutput(const cv::Mat& warped_frame,
         std::vector<std::vector<cv::Point>> contour_vec = { scaled_contour };
         cv::drawContours(mask_full, contour_vec, 0, cv::Scalar(255), cv::FILLED);
 
-        // Orijinal erode - sadece siyah çizgileri hariç tutmak için
         cv::Mat mask_eroded;
         cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
         cv::erode(mask_full, mask_eroded, kernel, cv::Point(-1, -1), 2);
 
-        // Ratio bilgisi ile renk tespiti
         ColorDetectionResult detection = color_detector_->detectColorWithRatio(
             warped_frame, hsv_warped, mask_eroded);
 
@@ -122,7 +217,6 @@ cv::Mat MosaicDetector::generateDigitalOutput(const cv::Mat& warped_frame,
         float current_ratio = detection.fill_ratio;
         std::string current_color_name = detection.color_name;
 
-        // Beyaz kontrolü VEYA çok düşük fill ratio
         bool is_white = (detection.color[0] == 255 &&
             detection.color[1] == 255 &&
             detection.color[2] == 255);
@@ -130,7 +224,6 @@ cv::Mat MosaicDetector::generateDigitalOutput(const cv::Mat& warped_frame,
         bool is_below_threshold = (current_ratio < MIN_FILL_RATIO_THRESHOLD);
 
         if (is_white || is_below_threshold) {
-            // Beyaz olarak kabul et
             color_histories_[i].clear();
             color_to_draw = cv::Scalar(255, 255, 255);
             ratio_histories_[i] = 0.0f;
@@ -140,13 +233,11 @@ cv::Mat MosaicDetector::generateDigitalOutput(const cv::Mat& warped_frame,
         else {
             color_histories_[i].addColor(detection.color);
             color_to_draw = color_histories_[i].getStableColor();
-            // Ratio smoothing
             ratio_histories_[i] = ratio_histories_[i] * 0.7f + current_ratio * 0.3f;
         }
 
         cv::drawContours(digital_output, contour_vec, 0, color_to_draw, cv::FILLED);
 
-        // Patch bilgisini kaydet
         PatchInfo info;
         info.patch_id = static_cast<int>(i);
         info.color_name = current_color_name;
@@ -165,7 +256,6 @@ cv::Mat MosaicDetector::generateDigitalOutput(const cv::Mat& warped_frame,
 
 void MosaicDetector::drawRatioInfo(cv::Mat& image, const std::vector<PatchInfo>& patch_infos) {
     for (const auto& info : patch_infos) {
-        // Sadece renkli ve eşik üstü patch'ler için ratio göster
         if (info.color_name == "White" || info.fill_ratio < MIN_FILL_RATIO_THRESHOLD) continue;
 
         std::stringstream ss;
@@ -183,7 +273,6 @@ void MosaicDetector::drawRatioInfo(cv::Mat& image, const std::vector<PatchInfo>&
             info.centroid.y + text_size.height / 2
         );
 
-        // Arka plan
         cv::Rect bg_rect(
             text_pos.x - 2,
             text_pos.y - text_size.height - 2,
@@ -208,6 +297,7 @@ void MosaicDetector::drawRatioInfo(cv::Mat& image, const std::vector<PatchInfo>&
 void MosaicDetector::run() {
     is_running_ = true;
     std::cout << "Mosaic Detector started. Press 'q' to quit." << std::endl;
+    std::cout << "Watching rotation angles..." << std::endl;
 
     while (is_running_) {
         cv::Mat frame;
@@ -229,22 +319,44 @@ void MosaicDetector::processFrame(cv::Mat& frame) {
     cv::Mat display = frame.clone();
 
     if (found) {
+        // Rotasyonu tespit et
+        int detected_rotation = detectRotation(target_corners);
+
+        // Smooth rotation
+        if (detected_rotation != current_rotation_) {
+            rotation_vote_count_++;
+            if (rotation_vote_count_ > 5) {
+                current_rotation_ = detected_rotation;
+                rotation_vote_count_ = 0;
+                std::cout << "Rotation changed to: " << current_rotation_ << " degrees" << std::endl;
+            }
+        }
+        else {
+            rotation_vote_count_ = 0;
+        }
+
         auto corners = marker_detector_->orderCorners(target_corners);
 
         for (size_t i = 0; i < corners.size(); i++) {
             cv::circle(display, corners[i], 8, cv::Scalar(0, 255, 0), -1);
         }
 
+        // Orijinal warped
         cv::Mat warped = applyPerspectiveTransform(frame, corners);
 
-        std::vector<PatchInfo> patch_infos;
-        cv::Mat digital = generateDigitalOutput(warped, patch_infos);
+        // Renk tespiti için normalleştir
+        cv::Mat warped_normalized = rotateImageInverse(warped, current_rotation_);
 
-        // Ratio bilgisini çiz
-        drawRatioInfo(digital, patch_infos);
+        std::vector<PatchInfo> patch_infos;
+        cv::Mat digital_normalized = generateDigitalOutput(warped_normalized, patch_infos);
+
+        drawRatioInfo(digital_normalized, patch_infos);
+
+        // Dijital çıktıyı orijinal rotasyona döndür
+        cv::Mat digital_rotated = rotateImage(digital_normalized, current_rotation_);
 
         cv::imshow("Warped", warped);
-        cv::imshow("Digital Mosaic", digital);
+        cv::imshow("Digital Mosaic", digital_rotated);
     }
 
     cv::imshow("Live Video", display);

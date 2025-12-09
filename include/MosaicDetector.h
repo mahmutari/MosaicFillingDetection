@@ -25,6 +25,10 @@ private:
     cv::VideoCapture camera_;
     bool is_running_;
 
+    // Rotasyon takibi
+    int current_rotation_;
+    int rotation_vote_count_ = 0;
+
     void initializeWindows();
 
     cv::Mat applyPerspectiveTransform(const cv::Mat& frame,
@@ -35,6 +39,11 @@ private:
 
     void drawRatioInfo(cv::Mat& image, const std::vector<PatchInfo>& patch_infos);
     cv::Point calculateContourCentroid(const std::vector<cv::Point>& contour);
+
+    // Rotasyon fonksiyonlarý
+    int detectRotation(const std::vector<std::vector<cv::Point2f>>& markers);
+    cv::Mat rotateImage(const cv::Mat& image, int rotation);
+    cv::Mat rotateImageInverse(const cv::Mat& image, int rotation);
 
 public:
     MosaicDetector(const std::string& template_path,
