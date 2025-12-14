@@ -275,16 +275,19 @@ cv::Mat MosaicDetector::applyPerspectiveTransform(
     int warp_width = static_cast<int>((width1 + width2) / 2.0f);
     int warp_height = static_cast<int>((height1 + height2) / 2.0f);
 
+    // Sabit kare boyut kullan - rotasyondan bağımsız tutarlılık için
+    int warp_size = std::max(warp_width, warp_height);
+
     std::vector<cv::Point2f> dst_points = {
         cv::Point2f(0, 0),
-        cv::Point2f(warp_width - 1, 0),
-        cv::Point2f(warp_width - 1, warp_height - 1),
-        cv::Point2f(0, warp_height - 1)
+        cv::Point2f(warp_size - 1, 0),
+        cv::Point2f(warp_size - 1, warp_size - 1),
+        cv::Point2f(0, warp_size - 1)
     };
 
     cv::Mat M = cv::getPerspectiveTransform(src_points, dst_points);
     cv::Mat warped;
-    cv::warpPerspective(frame, warped, M, cv::Size(warp_width, warp_height),
+    cv::warpPerspective(frame, warped, M, cv::Size(warp_size, warp_size),
         cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(255, 255, 255));
 
     return warped;
@@ -350,7 +353,8 @@ cv::Mat MosaicDetector::generateDigitalOutput(const cv::Mat& warped_frame,
         else {
             color_histories[i].addColor(detection.color);
             color_to_draw = color_histories[i].getStableColor();
-            ratio_histories[i] = ratio_histories[i] * 0.7f + current_ratio * 0.3f;
+            // Smoothing yok - anlık değer
+            ratio_histories[i] = current_ratio;
         }
 
         cv::drawContours(digital_output, contour_vec, 0, color_to_draw, cv::FILLED);
@@ -457,6 +461,10 @@ void MosaicDetector::processFrame(cv::Mat& frame) {
             if (rotation_vote_count_ > 5) {
                 current_rotation_ = detected_rotation;
                 rotation_vote_count_ = 0;
+                // Rotasyon değiştiğinde ratio history'yi sıfırla
+                for (auto& ratio : all_ratio_histories_[current_template_index_]) {
+                    ratio = 0.0f;
+                }
             }
         }
         else {
@@ -525,13 +533,6 @@ void MosaicDetector::processFrame(cv::Mat& frame) {
         }
 
         drawRatioInfo(digital_rotated, rotated_patch_infos);
-
-        // Template bilgisini göster
-        std::string template_info = template_names_[current_template_index_];
-        cv::putText(digital_rotated, template_info, cv::Point(10, 25),
-            cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 0, 0), 2);
-        cv::putText(digital_rotated, template_info, cv::Point(10, 25),
-            cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 1);
 
         cv::imshow("Warped", warped);
         cv::imshow("Digital Mosaic", digital_rotated);
