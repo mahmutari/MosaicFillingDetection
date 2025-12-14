@@ -8,22 +8,58 @@
 // Minimum fill ratio - bunun altındaki değerler beyaz olarak kabul edilir
 const float MIN_FILL_RATIO_THRESHOLD = 0.15f;  // %15
 
-MosaicDetector::MosaicDetector(const std::string& template_path,
+// Template değişimi için gereken tutarlı frame sayısı
+const int TEMPLATE_SWITCH_THRESHOLD = 10;
+
+MosaicDetector::MosaicDetector(const std::vector<std::string>& template_paths,
+    const std::vector<std::string>& template_names,
     int target_marker_id,
     int camera_index)
-    : is_running_(false), current_rotation_(0) {
+    : is_running_(false), current_rotation_(0), current_template_index_(0),
+    detected_template_index_(0), template_vote_count_(0) {
 
-    template_processor_ = std::make_unique<TemplateProcessor>(template_path);
+    if (template_paths.empty()) {
+        throw std::runtime_error("At least one template path is required!");
+    }
+
+    template_paths_ = template_paths;
+    template_names_ = template_names;
+
+    // İsim sayısı yeterli değilse varsayılan isimler ekle
+    while (template_names_.size() < template_paths_.size()) {
+        template_names_.push_back("Template " + std::to_string(template_names_.size() + 1));
+    }
+
+    // Tüm template'leri yükle
+    for (size_t i = 0; i < template_paths.size(); ++i) {
+        try {
+            auto processor = std::make_unique<TemplateProcessor>(template_paths[i]);
+            template_processors_.push_back(std::move(processor));
+
+            // Her template için history oluştur
+            size_t num_contours = template_processors_.back()->getContours().size();
+            all_color_histories_.push_back(std::vector<ColorHistory>(num_contours));
+            all_ratio_histories_.push_back(std::vector<float>(num_contours, 0.0f));
+
+            std::cout << "Template loaded: " << template_names_[i]
+                << " (" << template_paths[i] << ")" << std::endl;
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Warning: Could not load template " << template_paths[i]
+                << ": " << e.what() << std::endl;
+        }
+    }
+
+    if (template_processors_.empty()) {
+        throw std::runtime_error("No valid templates could be loaded!");
+    }
+
     color_detector_ = std::make_unique<ColorDetector>();
 
     cv::aruco::Dictionary dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_5X5_250);
     cv::aruco::DetectorParameters params;
     params.cornerRefinementMethod = cv::aruco::CORNER_REFINE_SUBPIX;
     marker_detector_ = std::make_unique<MarkerDetector>(target_marker_id, dictionary, params);
-
-    size_t num_contours = template_processor_->getContours().size();
-    color_histories_.resize(num_contours);
-    ratio_histories_.resize(num_contours, 0.0f);
 
     camera_.open(camera_index);
     if (!camera_.isOpened()) {
@@ -45,6 +81,24 @@ void MosaicDetector::initializeWindows() {
     cv::namedWindow("Digital Mosaic", cv::WINDOW_NORMAL);
 }
 
+void MosaicDetector::switchTemplate(int index) {
+    if (index >= 0 && index < static_cast<int>(template_processors_.size()) &&
+        index != current_template_index_) {
+        current_template_index_ = index;
+        std::cout << "Auto-switched to: " << template_names_[index] << std::endl;
+    }
+}
+
+void MosaicDetector::resetHistories(int index) {
+    if (index >= 0 && index < static_cast<int>(all_color_histories_.size())) {
+        for (auto& history : all_color_histories_[index]) {
+            history.clear();
+        }
+        std::fill(all_ratio_histories_[index].begin(),
+            all_ratio_histories_[index].end(), 0.0f);
+    }
+}
+
 cv::Point MosaicDetector::calculateContourCentroid(const std::vector<cv::Point>& contour) {
     cv::Moments m = cv::moments(contour);
     if (m.m00 == 0) {
@@ -57,7 +111,6 @@ cv::Point MosaicDetector::calculateContourCentroid(const std::vector<cv::Point>&
 int MosaicDetector::detectRotation(const std::vector<std::vector<cv::Point2f>>& markers) {
     if (markers.size() != 4) return 0;
 
-    // İlk marker'ı referans olarak kullan
     const auto& first_marker = markers[0];
     cv::Point2f marker_center(0, 0);
     for (const auto& pt : first_marker) {
@@ -65,40 +118,21 @@ int MosaicDetector::detectRotation(const std::vector<std::vector<cv::Point2f>>& 
     }
     marker_center *= 0.25f;
 
-    // Marker'ın 0. köşesinin merkeze göre yönü
     cv::Point2f corner0_dir = first_marker[0] - marker_center;
 
-    // Açıyı hesapla
     float angle = std::atan2(corner0_dir.y, corner0_dir.x) * 180.0f / CV_PI;
 
-    // Açıyı 0-360'a normalize et
     if (angle < 0) angle += 360.0f;
 
-    // DEBUG: Açıyı konsola yazdır
-    static int frame_count = 0;
-    if (frame_count++ % 30 == 0) {
-        std::cout << "Angle: " << std::fixed << std::setprecision(1) << angle << " degrees" << std::endl;
-    }
-
-    // Çıktılara göre düzeltilmiş açı aralıkları:
-    // ~218° → Normal (0°)
-    // ~307° → 90° saat yönünde  
-    // ~36-46° → 180°
-    // ~142° → 270°
-
-    // 180-270 arası: Normal (0°)
     if (angle >= 180.0f && angle < 270.0f) {
         return 0;
     }
-    // 270-360 arası: 90°
     else if (angle >= 270.0f && angle < 360.0f) {
         return 90;
     }
-    // 0-90 arası: 180°
     else if (angle >= 0.0f && angle < 90.0f) {
         return 180;
     }
-    // 90-180 arası: 270°
     else {
         return 270;
     }
@@ -150,6 +184,85 @@ cv::Mat MosaicDetector::rotateImageInverse(const cv::Mat& image, int rotation) {
     return rotated;
 }
 
+double MosaicDetector::calculateTemplateSimilarity(const cv::Mat& warped_lines, int template_index) {
+    if (template_index < 0 || template_index >= static_cast<int>(template_processors_.size())) {
+        return 0.0;
+    }
+
+    // Template'in siyah çizgilerini al
+    cv::Mat template_lines = template_processors_[template_index]->getTemplateLines();
+
+    // Aynı boyuta getir
+    cv::Mat template_resized;
+    cv::resize(template_lines, template_resized, warped_lines.size(), 0, 0, cv::INTER_NEAREST);
+
+    // Her iki maske de binary olmalı
+    cv::Mat warped_binary, template_binary;
+
+    if (warped_lines.channels() > 1) {
+        cv::cvtColor(warped_lines, warped_binary, cv::COLOR_BGR2GRAY);
+    }
+    else {
+        warped_binary = warped_lines.clone();
+    }
+
+    if (template_resized.channels() > 1) {
+        cv::cvtColor(template_resized, template_binary, cv::COLOR_BGR2GRAY);
+    }
+    else {
+        template_binary = template_resized.clone();
+    }
+
+    // Binary threshold
+    cv::threshold(warped_binary, warped_binary, 127, 255, cv::THRESH_BINARY);
+    cv::threshold(template_binary, template_binary, 127, 255, cv::THRESH_BINARY);
+
+    // Intersection over Union (IoU) benzeri metrik
+    cv::Mat intersection, union_mask;
+    cv::bitwise_and(warped_binary, template_binary, intersection);
+    cv::bitwise_or(warped_binary, template_binary, union_mask);
+
+    double intersection_count = cv::countNonZero(intersection);
+    double union_count = cv::countNonZero(union_mask);
+
+    if (union_count == 0) return 0.0;
+
+    return intersection_count / union_count;
+}
+
+int MosaicDetector::detectTemplate(const cv::Mat& warped_normalized) {
+    if (template_processors_.size() <= 1) {
+        return 0;  // Tek template varsa o
+    }
+
+    // Warped görüntüden siyah çizgileri çıkar
+    cv::Mat gray;
+    cv::cvtColor(warped_normalized, gray, cv::COLOR_BGR2GRAY);
+
+    // Siyah çizgileri bul (düşük değerli pikseller)
+    cv::Mat warped_lines;
+    cv::threshold(gray, warped_lines, 60, 255, cv::THRESH_BINARY_INV);
+
+    // Gürültüyü azalt
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+    cv::morphologyEx(warped_lines, warped_lines, cv::MORPH_CLOSE, kernel);
+
+    // Her template ile karşılaştır
+    double best_similarity = 0.0;
+    int best_index = 0;
+
+    for (size_t i = 0; i < template_processors_.size(); ++i) {
+        double similarity = calculateTemplateSimilarity(warped_lines, static_cast<int>(i));
+
+        if (similarity > best_similarity) {
+            best_similarity = similarity;
+            best_index = static_cast<int>(i);
+        }
+    }
+
+    return best_index;
+}
+
 cv::Mat MosaicDetector::applyPerspectiveTransform(
     const cv::Mat& frame,
     const std::vector<cv::Point2f>& src_points) {
@@ -181,17 +294,21 @@ cv::Mat MosaicDetector::generateDigitalOutput(const cv::Mat& warped_frame,
     std::vector<PatchInfo>& patch_infos) {
     patch_infos.clear();
 
+    auto& template_processor = template_processors_[current_template_index_];
+    auto& color_histories = all_color_histories_[current_template_index_];
+    auto& ratio_histories = all_ratio_histories_[current_template_index_];
+
     cv::Mat hsv_warped;
     cv::cvtColor(warped_frame, hsv_warped, cv::COLOR_BGR2HSV);
 
-    cv::Size template_size = template_processor_->getOutputSize();
+    cv::Size template_size = template_processor->getOutputSize();
     cv::Size warped_size = warped_frame.size();
 
     float scale_x = static_cast<float>(warped_size.width) / template_size.width;
     float scale_y = static_cast<float>(warped_size.height) / template_size.height;
 
     cv::Mat digital_output(warped_size, CV_8UC3, cv::Scalar(255, 255, 255));
-    const auto& original_contours = template_processor_->getContours();
+    const auto& original_contours = template_processor->getContours();
 
     for (size_t i = 0; i < original_contours.size(); ++i) {
         std::vector<cv::Point> scaled_contour;
@@ -224,16 +341,16 @@ cv::Mat MosaicDetector::generateDigitalOutput(const cv::Mat& warped_frame,
         bool is_below_threshold = (current_ratio < MIN_FILL_RATIO_THRESHOLD);
 
         if (is_white || is_below_threshold) {
-            color_histories_[i].clear();
+            color_histories[i].clear();
             color_to_draw = cv::Scalar(255, 255, 255);
-            ratio_histories_[i] = 0.0f;
+            ratio_histories[i] = 0.0f;
             current_color_name = "White";
             current_ratio = 0.0f;
         }
         else {
-            color_histories_[i].addColor(detection.color);
-            color_to_draw = color_histories_[i].getStableColor();
-            ratio_histories_[i] = ratio_histories_[i] * 0.7f + current_ratio * 0.3f;
+            color_histories[i].addColor(detection.color);
+            color_to_draw = color_histories[i].getStableColor();
+            ratio_histories[i] = ratio_histories[i] * 0.7f + current_ratio * 0.3f;
         }
 
         cv::drawContours(digital_output, contour_vec, 0, color_to_draw, cv::FILLED);
@@ -241,12 +358,12 @@ cv::Mat MosaicDetector::generateDigitalOutput(const cv::Mat& warped_frame,
         PatchInfo info;
         info.patch_id = static_cast<int>(i);
         info.color_name = current_color_name;
-        info.fill_ratio = ratio_histories_[i];
+        info.fill_ratio = ratio_histories[i];
         info.centroid = calculateContourCentroid(scaled_contour);
         patch_infos.push_back(info);
     }
 
-    cv::Mat template_lines = template_processor_->getTemplateLines();
+    cv::Mat template_lines = template_processor->getTemplateLines();
     cv::Mat scaled_lines;
     cv::resize(template_lines, scaled_lines, warped_size, 0, 0, cv::INTER_NEAREST);
     digital_output.setTo(cv::Scalar(0, 0, 0), scaled_lines);
@@ -296,8 +413,16 @@ void MosaicDetector::drawRatioInfo(cv::Mat& image, const std::vector<PatchInfo>&
 
 void MosaicDetector::run() {
     is_running_ = true;
-    std::cout << "Mosaic Detector started. Press 'q' to quit." << std::endl;
-    std::cout << "Watching rotation angles..." << std::endl;
+    std::cout << "\n=== Mosaic Detector ===" << std::endl;
+    std::cout << "Templates loaded: " << template_processors_.size() << std::endl;
+    for (size_t i = 0; i < template_names_.size() && i < template_processors_.size(); ++i) {
+        std::cout << "  " << (i + 1) << ". " << template_names_[i] << std::endl;
+    }
+    std::cout << "\nAutomatic template detection: ENABLED" << std::endl;
+    std::cout << "Controls:" << std::endl;
+    std::cout << "  'r' - Reset current template histories" << std::endl;
+    std::cout << "  'q' - Quit" << std::endl;
+    std::cout << "\nWaiting for mosaic..." << std::endl;
 
     while (is_running_) {
         cv::Mat frame;
@@ -307,7 +432,13 @@ void MosaicDetector::run() {
         processFrame(frame);
 
         char key = cv::waitKey(1);
-        if (key == 'q' || key == 27) break;
+        if (key == 'q' || key == 27) {
+            break;
+        }
+        else if (key == 'r') {
+            resetHistories(current_template_index_);
+            std::cout << "Histories reset for " << template_names_[current_template_index_] << std::endl;
+        }
     }
     stop();
 }
@@ -319,16 +450,13 @@ void MosaicDetector::processFrame(cv::Mat& frame) {
     cv::Mat display = frame.clone();
 
     if (found) {
-        // Rotasyonu tespit et
         int detected_rotation = detectRotation(target_corners);
 
-        // Smooth rotation
         if (detected_rotation != current_rotation_) {
             rotation_vote_count_++;
             if (rotation_vote_count_ > 5) {
                 current_rotation_ = detected_rotation;
                 rotation_vote_count_ = 0;
-                std::cout << "Rotation changed to: " << current_rotation_ << " degrees" << std::endl;
             }
         }
         else {
@@ -341,19 +469,69 @@ void MosaicDetector::processFrame(cv::Mat& frame) {
             cv::circle(display, corners[i], 8, cv::Scalar(0, 255, 0), -1);
         }
 
-        // Orijinal warped
         cv::Mat warped = applyPerspectiveTransform(frame, corners);
-
-        // Renk tespiti için normalleştir
         cv::Mat warped_normalized = rotateImageInverse(warped, current_rotation_);
+
+        // Otomatik template algılama
+        int detected_template = detectTemplate(warped_normalized);
+
+        if (detected_template != detected_template_index_) {
+            detected_template_index_ = detected_template;
+            template_vote_count_ = 1;
+        }
+        else {
+            template_vote_count_++;
+        }
+
+        // Belirli sayıda tutarlı algılama sonrası template değiştir
+        if (template_vote_count_ >= TEMPLATE_SWITCH_THRESHOLD &&
+            detected_template_index_ != current_template_index_) {
+            switchTemplate(detected_template_index_);
+            template_vote_count_ = 0;
+        }
 
         std::vector<PatchInfo> patch_infos;
         cv::Mat digital_normalized = generateDigitalOutput(warped_normalized, patch_infos);
 
-        drawRatioInfo(digital_normalized, patch_infos);
-
-        // Dijital çıktıyı orijinal rotasyona döndür
+        // Önce döndür, sonra ratio bilgisini çiz (yazılar düz kalır)
         cv::Mat digital_rotated = rotateImage(digital_normalized, current_rotation_);
+
+        // Patch centroid'lerini de döndür
+        std::vector<PatchInfo> rotated_patch_infos = patch_infos;
+        cv::Size norm_size = digital_normalized.size();
+        cv::Size rot_size = digital_rotated.size();
+
+        for (auto& info : rotated_patch_infos) {
+            cv::Point old_pt = info.centroid;
+            cv::Point new_pt;
+
+            if (current_rotation_ == 90) {
+                new_pt.x = norm_size.height - 1 - old_pt.y;
+                new_pt.y = old_pt.x;
+            }
+            else if (current_rotation_ == 180) {
+                new_pt.x = norm_size.width - 1 - old_pt.x;
+                new_pt.y = norm_size.height - 1 - old_pt.y;
+            }
+            else if (current_rotation_ == 270) {
+                new_pt.x = old_pt.y;
+                new_pt.y = norm_size.width - 1 - old_pt.x;
+            }
+            else {
+                new_pt = old_pt;
+            }
+
+            info.centroid = new_pt;
+        }
+
+        drawRatioInfo(digital_rotated, rotated_patch_infos);
+
+        // Template bilgisini göster
+        std::string template_info = template_names_[current_template_index_];
+        cv::putText(digital_rotated, template_info, cv::Point(10, 25),
+            cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 0, 0), 2);
+        cv::putText(digital_rotated, template_info, cv::Point(10, 25),
+            cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 1);
 
         cv::imshow("Warped", warped);
         cv::imshow("Digital Mosaic", digital_rotated);
